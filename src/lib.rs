@@ -276,22 +276,27 @@ mod test {
 
     #[test]
     fn test_normal_use() {
+        enum Message {
+            RunFunction(Box<FnBox() + Send>),
+            Done,
+        }
+
         // Create an isolation runner that uses channels to send boxed functions
         // back to the main thread for it to run.
         struct Runner {
-            tx: Mutex<Sender<Box<FnBox() + Send>>>,
+            tx: Mutex<Sender<Message>>,
         }
 
         impl IsolationRunner for Runner {
             fn run_on_owning_thread(&self, boxed: Box<FnBox() + Send>) {
                 let guard = self.tx.lock().unwrap();
-                guard.send(boxed).unwrap();
+                guard.send(Message::RunFunction(boxed)).unwrap();
             }
         }
 
-        let (tx_check_done, rx_check_done) = channel();
         let (tx_f, rx_f) = channel();
         let (tx_clone, rx_clone) = channel();
+        let tx_check_done = tx_f.clone();
 
         // start up the owning thread
         let handle = thread::spawn(move || {
@@ -303,19 +308,16 @@ mod test {
             tx_clone.send(t.clone_for_non_owning_thread()).unwrap();
 
             loop {
-                select! (
-                    // If we receive a message on rx_check_done, confirm that t has been
+                match rx_f.recv().unwrap() {
+                    // If we receive an exit message, confirm that t has been
                     // incremented the expected number of times, then exit.
-                    _ = rx_check_done.recv() => {
+                    Message::Done => {
                         assert_eq!(*t.borrow(), 20);
                         return
-                    },
-
-                    // If we receive a function on rx_f, run it.
-                    f = rx_f.recv() => {
-                        f.unwrap()();
                     }
-                )
+                    // If we receive a function on rx_f, run it.
+                    Message::RunFunction(f) => f(),
+                }
             }
         });
 
@@ -344,7 +346,7 @@ mod test {
         barrier.wait();
 
         // send the owning thread the message to check that its counter is as expected
-        tx_check_done.send(()).unwrap();
+        tx_check_done.send(Message::Done).unwrap();
 
         assert!(handle.join().is_ok());
     }
